@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    environment:
+      POSTGRES_USER: vecsim
+      POSTGRES_PASSWORD: vecsim
+      POSTGRES_DB: vecsim
+    ports:
+      - "5432:5432"
+    volumes:
+      - vecsim_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vecsim"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  vecsim_pgdata:
