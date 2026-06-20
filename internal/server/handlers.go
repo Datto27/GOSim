@@ -16,8 +16,38 @@ import (
 	"github.com/Datto27/vecsim/internal/config"
 	"github.com/Datto27/vecsim/internal/embeddings"
 	"github.com/Datto27/vecsim/internal/indexer"
+	"github.com/Datto27/vecsim/internal/rerank"
 	"github.com/Datto27/vecsim/internal/store"
 )
+
+// candidatePoolMultiplier and candidatePoolMax bound how many candidates are
+// fetched from pgvector before re-ranking by weight, so the weighted-closest
+// item isn't missed just because it wasn't in the top req.Limit by raw
+// cosine similarity.
+const (
+	candidatePoolMultiplier = 5
+	candidatePoolMax        = 200
+)
+
+// validateWeights rejects any negative weight value.
+func validateWeights(weights map[string]float64) error {
+	for k, v := range weights {
+		if v < 0 {
+			return fmt.Errorf("weight for %q must not be negative", k)
+		}
+	}
+	return nil
+}
+
+// fetchLimitFor returns the candidate pool size to fetch from pgvector
+// before re-ranking: limit itself when no weights are given (today's
+// behavior, unchanged), or a wider pool when weighting is active.
+func fetchLimitFor(limit int, weights map[string]float64) int {
+	if len(weights) == 0 {
+		return limit
+	}
+	return min(limit*candidatePoolMultiplier, candidatePoolMax)
+}
 
 // Handlers holds all HTTP handler methods for vecsim's API.
 type Handlers struct {
@@ -169,11 +199,12 @@ func (h *Handlers) DeleteItem(w http.ResponseWriter, r *http.Request) {
 // ─── /search ─────────────────────────────────────────────────────────────────
 
 type searchRequest struct {
-	ID        string `json:"id"`
-	Label     string `json:"label"`
-	Type      string `json:"type"`
-	CrossType bool   `json:"cross_type"`
-	Limit     int    `json:"limit"`
+	ID        string             `json:"id"`
+	Label     string             `json:"label"`
+	Type      string             `json:"type"`
+	CrossType bool               `json:"cross_type"`
+	Limit     int                `json:"limit"`
+	Weights   map[string]float64 `json:"weights,omitempty"`
 }
 
 type searchResponse struct {
@@ -189,6 +220,10 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Limit <= 0 {
 		req.Limit = 10
+	}
+	if err := validateWeights(req.Weights); err != nil {
+		WriteError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// Resolve query item by ID (preferred) or label.
@@ -228,20 +263,22 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 		typeFilter = ""
 	}
 
-	results, err := h.store.SearchByVector(r.Context(), vec, typeFilter, item.ID, req.Limit)
+	results, err := h.store.SearchByVector(r.Context(), vec, typeFilter, item.ID, fetchLimitFor(req.Limit, req.Weights))
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	results = rerank.Rerank(*item, results, req.Weights, req.Limit)
 
 	WriteJSON(w, http.StatusOK, searchResponse{Query: item, Results: results})
 }
 
 type searchEmbedRequest struct {
-	Text      string `json:"text"`
-	Type      string `json:"type"`
-	CrossType bool   `json:"cross_type"`
-	Limit     int    `json:"limit"`
+	Text      string             `json:"text"`
+	Type      string             `json:"type"`
+	CrossType bool               `json:"cross_type"`
+	Limit     int                `json:"limit"`
+	Weights   map[string]float64 `json:"weights,omitempty"`
 }
 
 func (h *Handlers) SearchByText(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +294,10 @@ func (h *Handlers) SearchByText(w http.ResponseWriter, r *http.Request) {
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
+	if err := validateWeights(req.Weights); err != nil {
+		WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	vecs, err := h.embedder.Embed(r.Context(), []string{req.Text})
 	if err != nil {
@@ -269,11 +310,15 @@ func (h *Handlers) SearchByText(w http.ResponseWriter, r *http.Request) {
 		typeFilter = ""
 	}
 
-	results, err := h.store.SearchByVector(r.Context(), pgvector.NewVector(vecs[0]), typeFilter, "", req.Limit)
+	results, err := h.store.SearchByVector(r.Context(), pgvector.NewVector(vecs[0]), typeFilter, "", fetchLimitFor(req.Limit, req.Weights))
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// There is no structured query item for a free-text search, so only the
+	// "semantic" weight key has any effect here; other keys are silently
+	// ignored since there's nothing to compare them against.
+	results = rerank.Rerank(adapters.Item{}, results, req.Weights, req.Limit)
 
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"query":   req.Text,

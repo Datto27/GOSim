@@ -14,335 +14,7 @@ Because every item — movie, album, book — lives in the same embedding space,
 
 ---
 
-## Use cases
-
-### "More like this" recommendations
-
-You have a movie, book, or album a user just finished and want to suggest what to read, watch, or listen to next. Feed the item's ID into `POST /search` with `"cross_type": true` and get a ranked list of semantically similar items across all domains — no manual tagging or genre matching required.
-
-```bash
-vecsim search "Interstellar" --cross-type --limit 5
-# → The Three-Body Problem (book, score 0.91)
-# → Interstellar Soundtrack (music, score 0.94)
-# → Arrival (movie, score 0.89)
-# → Project Hail Mary (book, score 0.87)
-# → Origin of Symmetry (music, score 0.84)
-```
-
-### Mood-based discovery without keywords
-
-A user describes what they're in the mood for in plain language. Use `POST /search/embed` to embed their description directly and search without needing a matching item in the database.
-
-```bash
-curl -s localhost:7700/search/embed -d '{
-  "text": "something melancholic and introspective, like a quiet rainy afternoon",
-  "cross_type": true,
-  "limit": 8
-}'
-# → For Emma, Forever Ago, Norwegian Wood, A Moon Shaped Pool,
-#    The Fault in Our Stars, In Rainbows, Eternal Sunshine …
-```
-
-### Backend similarity microservice
-
-Any other application — a web app, a recommendation engine, a data pipeline — can call vecsim's HTTP API over localhost without knowing anything about embeddings or Postgres. The caller just sends a label or free-text query and receives ranked results with scores. vecsim acts as a self-contained semantic search sidecar.
-
-### Extending to new content domains
-
-Add podcasts, recipes, video games, or products by creating a single new file in `internal/adapters/` that implements the `Adapter` interface. The new type immediately participates in seeding, indexing, search, and cross-type queries — the rest of the codebase requires zero changes.
-
-```go
-// internal/adapters/podcast.go
-func init() { Register(&PodcastAdapter{}) }
-
-func (a *PodcastAdapter) Type() string { return "podcast" }
-func (a *PodcastAdapter) Seeds() []SeedItem { /* 25 episodes */ }
-func (a *PodcastAdapter) BuildText(fields map[string]any) string {
-    return fmt.Sprintf("%s — %s. Topics: %s. %s",
-        fields["title"], fields["host"],
-        joinOr(stringSlice(fields["topics"]), ""),
-        fields["description"])
-}
-```
-
-### Local, private search — no API keys or cloud dependency
-
-All embedding and search happens on your own machine after the initial `ollama pull`. No data leaves your environment, no rate limits, no per-request cost. Suitable for personal media libraries, private research collections, or air-gapped environments.
-
-### Seeding and testing a vector search pipeline
-
-vecsim's 75 curated seed items (with intentional thematic cross-type overlap) make it a useful fixture for testing embedding quality, tuning HNSW index parameters, or benchmarking cosine similarity performance without building your own dataset.
-
----
-
-## Full walkthrough
-
-This is a complete example session from a fresh checkout to a working cross-type search, using the **optimized** profile (recommended for most machines).
-
-### 1 — Setup
-
-```
-$ go run . setup --pull
-
-╔══════════════════════════════════════════╗
-║         vecsim — first-run setup         ║
-╚══════════════════════════════════════════╝
-
-Choose an embedding profile:
-
-  [1] max       — qwen3-embedding:8b  (4096 dims)
-                  Best quality. 6-8 GB RAM, GPU recommended.
-                  ~4.7 GB download.
-
-  [2] optimized — nomic-embed-text    (768 dims)
-                  Great quality. Runs on any modern laptop, ~600 MB RAM.
-                  ~274 MB download.  ← Recommended for most users
-
-  Profile (1 or 2) [2]: 2
-  → optimized selected (nomic-embed-text, 768 dims)
-
-Connection details:
-  Ollama URL [http://localhost:11434]:
-  Database URL [postgres://vecsim:vecsim@localhost:5432/vecsim?sslmode=disable]:
-  API port [7700]:
-
-Checking connectivity…
-  ✓ Ollama at http://localhost:11434 — reachable
-  ✓ Postgres — connected
-
-  Config saved to /home/user/.config/vecsim/config.json
-
-Pulling nomic-embed-text…
-  pulling manifest: 100%
-
-  ✓ Model ready
-
-Next steps:
-  1. docker compose up -d   (if Postgres isn't running yet)
-  2. vecsim migrate          (create tables & HNSW index)
-  3. vecsim seed --type all  (load 75 seed items)
-  4. vecsim index --type all (generate embeddings)
-  5. vecsim search "Inception" --cross-type
-     vecsim serve            (start the HTTP API on localhost:7700)
-```
-
-### 2 — Start Postgres
-
-```
-$ docker compose up -d
-[+] Running 2/2
- ✔ Volume "vecsim_pgdata"  Created
- ✔ Container gosim-postgres-1  Started
-```
-
-### 3 — Migrate
-
-```
-$ go run . migrate
-Migrations applied (profile: optimized, dims: 768)
-Profile recorded in vecsim_meta
-```
-
-At this point the database has:
-- `items` table with `embedding vector(768)` column
-- HNSW cosine index (`items_embedding_hnsw_idx`)
-- `vecsim_meta` table with `profile = optimized`
-
-### 4 — Seed
-
-```
-$ go run . seed --type all
-TYPE    ID                                    STATUS
-────    ──                                    ──────
-movie   movie:inception                       inserted
-movie   movie:the-matrix                      inserted
-movie   movie:interstellar                    inserted
-...
-music   music:time-hans-zimmer                inserted
-music   music:ok-computer-radiohead           inserted
-...
-book    book:recursion                        inserted
-book    book:dark-matter                      inserted
-...
-
-75 items processed: 75 inserted, 0 skipped
-```
-
-Re-running is safe — all 75 report `skipped`.
-
-### 5 — Index
-
-```
-$ go run . index --type all
-Indexing movie: 25/25
-Indexing music: 25/25
-Indexing book: 25/25
-```
-
-Ollama is called in batches of 20 items. Each batch makes one HTTP request to `/api/embed` and stores the resulting vectors. Total time depends on hardware — on a modern laptop with `nomic-embed-text` this takes roughly 10–30 seconds.
-
-### 6 — Check stats
-
-```
-$ go run . stats
-TYPE    TOTAL  EMBEDDED  COVERAGE
-────    ─────  ────────  ────────
-book    25     25        100.0%
-movie   25     25        100.0%
-music   25     25        100.0%
-────    ─────  ────────  ────────
-TOTAL   75     75        100.0%
-```
-
-### 7 — Search within a type
-
-```
-$ go run . search "Inception" --limit 5
-Similar to "Inception" [movie]:
-
-RANK  TYPE   LABEL                                  SCORE
-────  ────   ─────                                  ─────
-1     movie  Memento                                0.8923
-2     movie  Arrival                                0.8741
-3     movie  The Matrix                             0.8634
-4     movie  Eternal Sunshine of the Spotless Mind  0.8501
-5     movie  The Truman Show                        0.8388
-```
-
-### 8 — Cross-type search
-
-The same query, now searching across all three domains simultaneously:
-
-```
-$ go run . search "Inception" --cross-type --limit 10
-Similar to "Inception" [movie] (cross-type):
-
-RANK  TYPE   LABEL                                  SCORE
-────  ────   ─────                                  ─────
-1     movie  Memento                                0.8923
-2     book   Recursion                              0.8811
-3     music  Time                                   0.8794
-4     movie  Arrival                                0.8741
-5     book   Dark Matter                            0.8702
-6     music  Interstellar (Soundtrack)              0.8659
-7     movie  The Matrix                             0.8634
-8     book   Kafka on the Shore                     0.8597
-9     music  Lateralus                              0.8521
-10    movie  Eternal Sunshine of the Spotless Mind  0.8501
-```
-
-Inception (2010 film) surfaces a Blake Crouch novel, a Hans Zimmer track, and a Tool album — not because they share genre tags, but because the embedding model encodes shared themes of memory, altered perception, and layered reality.
-
-### 9 — Start the HTTP API
-
-```
-$ go run . serve
-time=2026-06-16T22:00:00Z level=INFO msg="vecsim HTTP API started" addr=localhost:7700
-```
-
-In another terminal:
-
-```
-$ curl -s localhost:7700/health | jq
-{
-  "profile": "optimized",
-  "model": "nomic-embed-text",
-  "dimensions": 768,
-  "ollama_ok": true,
-  "db_ok": true
-}
-
-$ curl -s localhost:7700/stats | jq '.by_type'
-{
-  "book":  { "count": 25, "embedded": 25 },
-  "movie": { "count": 25, "embedded": 25 },
-  "music": { "count": 25, "embedded": 25 }
-}
-
-$ curl -s localhost:7700/search \
-    -H 'Content-Type: application/json' \
-    -d '{"label":"Inception","cross_type":true,"limit":3}' | jq '.results[] | {label:.item.label, type:.item.type, score}'
-{
-  "label": "Memento",
-  "type": "movie",
-  "score": 0.8923
-}
-{
-  "label": "Recursion",
-  "type": "book",
-  "score": 0.8811
-}
-{
-  "label": "Time",
-  "type": "music",
-  "score": 0.8794
-}
-```
-
-### 10 — Free-text search (no existing item needed)
-
-```
-$ curl -s localhost:7700/search/embed \
-    -H 'Content-Type: application/json' \
-    -d '{
-      "text": "a melancholic coming-of-age story about friendship and nostalgia",
-      "cross_type": true,
-      "limit": 5
-    }' | jq '.results[] | {label:.item.label, type:.item.type, score}'
-{
-  "label": "Stand By Me",
-  "type": "movie",
-  "score": 0.9102
-}
-{
-  "label": "The Body",
-  "type": "book",
-  "score": 0.9057
-}
-{
-  "label": "Stand By Me",
-  "type": "music",
-  "score": 0.8934
-}
-{
-  "label": "The Suburbs",
-  "type": "music",
-  "score": 0.8811
-}
-{
-  "label": "Norwegian Wood",
-  "type": "book",
-  "score": 0.8743
-}
-```
-
-A free-text description matched the movie, the Stephen King novella it's based on, Ben E. King's song, and two other coming-of-age items — all from a single query with no item ID required.
-
-### 11 — Add a new item via API
-
-```
-$ curl -s localhost:7700/items \
-    -H 'Content-Type: application/json' \
-    -d '{
-      "label": "Annihilation",
-      "type": "movie",
-      "fields": {
-        "title": "Annihilation",
-        "year": 2018,
-        "genre": ["Sci-Fi", "Horror"],
-        "cast": ["Natalie Portman", "Jennifer Jason Leigh"],
-        "plot": "A biologist signs up for a dangerous expedition into an environmental disaster zone where the laws of nature do not apply."
-      },
-      "tags": ["sci-fi", "horror", "mind-bending", "identity"]
-    }' | jq '{id, label, embedded}'
-{
-  "id": "movie:annihilation",
-  "label": "Annihilation",
-  "embedded": true
-}
-```
-
-The item is inserted and embedded in a single request. It is immediately searchable.
+Use cases (recommendations, mood-based discovery, extending to new domains, etc.) and a full step-by-step walkthrough with example output live in **[docs/EXAMPLES.md](docs/EXAMPLES.md)**.
 
 ---
 
@@ -428,9 +100,17 @@ Inserts the 25 hardcoded seed items for a domain (default: all three). Already-e
 
 Finds all items where `embedding IS NULL`, calls Ollama in batches of 20, and stores the resulting vectors. Shows live progress per type. Safe to re-run — already-indexed items are never re-embedded.
 
-### `vecsim search <title> [--type movie|music|book] [--cross-type] [--limit N]`
+### `vecsim search <title> [--type movie|music|book] [--cross-type] [--limit N] [--weight key=value,...]`
 
 Fetches the stored embedding for `<title>` and returns the top N most similar items ranked by cosine similarity score (1.0 = identical). Use `--cross-type` to search across all domains simultaneously. Use `--type` to disambiguate if a label matches items in multiple types.
+
+Use `--weight` (repeatable, or comma-separated) to weight individual parameters in the ranking instead of relying on the single similarity score, e.g.:
+
+```bash
+vecsim search "Dune" --cross-type --weight genre=2,year=0.5,cast=0
+```
+
+Recognized weight keys are `semantic` (the base cosine similarity score), `tags`, and any field name from the item's domain (`year`, `genre`, `cast`, `plot`, `artist`, `mood`, `author`, `synopsis`, ...; see [Data model](#data-model) for the fields per domain). Any key not mentioned defaults to a weight of `1` (equal weighting), so omitting `--weight` entirely reproduces today's plain similarity ranking. Weights must be non-negative; a weight of `0` excludes that parameter from the ranking.
 
 ### `vecsim serve [--port N]`
 
@@ -507,11 +187,14 @@ POST /search
 {
   "label": "Inception",
   "cross_type": true,
-  "limit": 10
+  "limit": 10,
+  "weights": { "genre": 2.0, "year": 0.5, "cast": 0 }
 }
 ```
 
 Use `"id"` instead of `"label"` for an unambiguous lookup. `"type"` scopes the label resolution when a label matches multiple types.
+
+`"weights"` is optional and lets you weight individual parameters in the ranking instead of relying on the single similarity score. Recognized keys are `"semantic"` (the base cosine similarity score), `"tags"`, and any field name from the item's domain (`year`, `genre`, `cast`, `plot`, `artist`, `mood`, `author`, `synopsis`, ...; see [Data model](#data-model)). Keys not mentioned default to a weight of `1` (equal weighting), so omitting `"weights"` entirely reproduces plain similarity ranking. Weights must be non-negative (a `400` is returned otherwise); a weight of `0` excludes that parameter.
 
 ```
 POST /search/embed
@@ -525,6 +208,8 @@ Search with free text instead of a stored item:
   "limit": 10
 }
 ```
+
+`/search/embed` also accepts `"weights"`, but since a free-text query has no stored item with structured fields to compare against, only the `"semantic"` key has any effect there — other keys are accepted but ignored.
 
 Response for both search endpoints:
 ```json
