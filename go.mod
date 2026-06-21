@@ -1,4 +1,4 @@
-module github.com/Datto27/vecsim
+module github.com/Datto27/GOSim
 
 go 1.25.10
 

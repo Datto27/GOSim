@@ -8,93 +8,94 @@ import (
 
 	pgvector "github.com/pgvector/pgvector-go"
 
-	"github.com/Datto27/vecsim/internal/adapters"
-	"github.com/Datto27/vecsim/internal/embeddings"
-	"github.com/Datto27/vecsim/internal/store"
+	"github.com/Datto27/GOSim/internal/adapters"
+	"github.com/Datto27/GOSim/internal/embeddings"
+	"github.com/Datto27/GOSim/internal/schema"
+	"github.com/Datto27/GOSim/internal/store"
 )
 
-// Progress reports indexing progress for a single type.
+// Progress reports indexing progress: Done out of Total items embedded so far.
 type Progress struct {
-	Type  string
 	Done  int
-	Total int // items that still needed embedding when this type's run began
+	Total int
 }
 
-// Run fetches unembedded items for the given type (or all types when typ is
-// "all" or ""), generates embeddings in batches of batchSize via embedder,
-// and persists them via s. onProgress is called after each batch (may be nil).
+// Run embeds items via embedder and persists the vectors. With force=false it
+// embeds only items lacking an embedding; with force=true it recomputes every
+// item (needed after the embedding text changes). Pass typ="" (or "all") to
+// cover every collection. The embedding text for each item is built from its
+// collection's detected text fields (schema.EmbeddingText), so the vector
+// carries meaning rather than every flattened field. onProgress may be nil.
 func Run(
 	ctx context.Context,
 	s *store.Store,
 	e *embeddings.OllamaEmbedder,
 	typ string,
 	batchSize int,
+	force bool,
 	onProgress func(Progress),
 ) error {
-	types := resolveTypes(typ)
-
-	for _, t := range types {
-		if err := runForType(ctx, s, e, t, batchSize, onProgress); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func resolveTypes(typ string) []string {
-	if typ == "" || typ == "all" {
-		return adapters.Types()
-	}
-	return []string{typ}
-}
-
-func runForType(
-	ctx context.Context,
-	s *store.Store,
-	e *embeddings.OllamaEmbedder,
-	typ string,
-	batchSize int,
-	onProgress func(Progress),
-) error {
-	ad, ok := adapters.Get(typ)
-	if !ok {
-		return fmt.Errorf("indexer: unknown type %q", typ)
+	if typ == "all" {
+		typ = ""
 	}
 
-	// Count how many items need embedding at the start of this run.
-	pending, err := s.ItemsMissingEmbedding(ctx, typ, 100_000)
+	var (
+		items []adapters.Item
+		err   error
+	)
+	if force {
+		items, err = s.ItemsForReembed(ctx, typ)
+	} else {
+		items, err = s.ItemsMissingEmbedding(ctx, typ, 1_000_000)
+	}
 	if err != nil {
-		return fmt.Errorf("indexer: %s: %w", typ, err)
+		return fmt.Errorf("indexer: load items: %w", err)
 	}
-	total := len(pending)
-	done := 0
 
-	for {
-		batch, err := s.ItemsMissingEmbedding(ctx, typ, batchSize)
+	total := len(items)
+	if total == 0 {
+		return nil
+	}
+
+	// Cache each collection's schema so embedding text uses only its text fields.
+	schemaCache := map[string]schema.Schema{}
+	schemaFor := func(t string) schema.Schema {
+		if sc, ok := schemaCache[t]; ok {
+			return sc
+		}
+		sc, _, err := s.GetCollection(ctx, t)
 		if err != nil {
-			return fmt.Errorf("indexer: %s: fetch batch: %w", typ, err)
+			sc = schema.Schema{}
 		}
-		if len(batch) == 0 {
-			break
+		schemaCache[t] = sc
+		return sc
+	}
+
+	done := 0
+	for start := 0; start < total; start += batchSize {
+		end := start + batchSize
+		if end > total {
+			end = total
 		}
+		batch := items[start:end]
 
 		texts := make([]string, len(batch))
 		for i, item := range batch {
-			texts[i] = ad.BuildText(item.Fields)
+			texts[i] = schema.EmbeddingText(item.Fields, schemaFor(item.Type))
 		}
 
 		vecs, err := e.Embed(ctx, texts)
 		if err != nil {
-			return fmt.Errorf("indexer: %s: embed batch: %w", typ, err)
+			return fmt.Errorf("indexer: embed batch: %w", err)
 		}
 
 		for i, item := range batch {
 			if err := s.SetEmbedding(ctx, item.ID, pgvector.NewVector(vecs[i])); err != nil {
-				return fmt.Errorf("indexer: %s: save embedding for %s: %w", typ, item.ID, err)
+				return fmt.Errorf("indexer: save embedding for %s: %w", item.ID, err)
 			}
 			done++
 			if onProgress != nil {
-				onProgress(Progress{Type: typ, Done: done, Total: total})
+				onProgress(Progress{Done: done, Total: total})
 			}
 		}
 	}

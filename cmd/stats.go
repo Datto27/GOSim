@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-
-	"github.com/Datto27/vecsim/internal/adapters"
 )
 
 var statsCmd = &cobra.Command{
@@ -34,16 +33,23 @@ func runStats(ctx context.Context) error {
 	fmt.Fprintln(w, "TYPE\tTOTAL\tEMBEDDED\tCOVERAGE")
 	fmt.Fprintln(w, "────\t─────\t────────\t────────")
 
-	for _, t := range adapters.Types() {
-		ts, ok := result.ByType[t]
-		if !ok {
-			continue
-		}
+	types := make([]string, 0, len(result.ByType))
+	for t := range result.ByType {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+
+	for _, t := range types {
+		ts := result.ByType[t]
 		pct := 0.0
 		if ts.Count > 0 {
 			pct = 100.0 * float64(ts.Embedded) / float64(ts.Count)
 		}
 		fmt.Fprintf(w, "%s\t%d\t%d\t%.1f%%\n", t, ts.Count, ts.Embedded, pct)
+	}
+
+	if len(types) == 0 {
+		fmt.Fprintln(w, "(no collections yet — import data with 'gosim import <file>')\t\t\t")
 	}
 
 	totalPct := 0.0

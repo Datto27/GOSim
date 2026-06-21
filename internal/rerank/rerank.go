@@ -1,39 +1,34 @@
-// Package rerank adds optional per-field weighting on top of vecsim's
-// cosine-similarity search. Given a wider candidate pool fetched by
-// pgvector, it recomputes a weighted blend of the semantic score and
-// structured-field similarity (read directly off adapters.Item.Fields and
-// .Tags) and re-sorts. It has no dependency on any per-domain adapter code:
-// fields are compared generically by their Go type after JSON decoding, so
-// adding a new content domain requires no changes here.
+// Package rerank implements GOSim's hybrid ranking: it blends the semantic
+// (embedding) similarity with per-field structured similarity, weighted by a
+// user-supplied, per-collection weight map and driven entirely by the detected
+// schema. It hardcodes no field names — list, number and keyword fields are
+// handled by their detected kind.
 package rerank
 
 import (
 	"sort"
 	"strings"
 
-	"github.com/Datto27/vecsim/internal/adapters"
-	"github.com/Datto27/vecsim/internal/store"
+	"github.com/Datto27/GOSim/internal/adapters"
+	"github.com/Datto27/GOSim/internal/schema"
+	"github.com/Datto27/GOSim/internal/store"
 )
 
-// SemanticKey is the weight map key referring to the existing cosine
-// similarity score (always present, even when query and candidate share no
-// comparable structured fields).
+// SemanticKey is the weight-map key for the embedding (cosine) similarity. It
+// always participates, defaulting to weight 1 when unspecified.
 const SemanticKey = "semantic"
 
-// TagsKey is the weight map key referring to Jaccard similarity between the
-// query's and candidate's Tags slices (always present and comparable across
-// content types).
+// TagsKey is the weight-map key for overlap between the items' Tags slices
+// (which live outside Fields, so they are not part of the detected schema).
 const TagsKey = "tags"
 
-// Rerank returns the top limit results from results, re-scored by a
-// weighted blend of similarity signals when weights is non-empty. When
-// weights is empty, it is a no-op passthrough (besides truncating to
-// limit), so callers that pass no weights see identical behavior to plain
-// vector search.
-func Rerank(query adapters.Item, results []store.SearchResult, weights map[string]float64, limit int) []store.SearchResult {
-	if len(weights) > 0 {
+// Rerank re-scores results with the hybrid score when any structured weight is
+// active, then truncates to limit. With only the semantic weight (or none), it
+// is a passthrough, preserving plain vector-search order.
+func Rerank(query adapters.Item, results []store.SearchResult, sch schema.Schema, weights map[string]float64, limit int) []store.SearchResult {
+	if HasStructuralWeight(weights) {
 		for i := range results {
-			results[i].Score = Score(query, results[i].Item, results[i].Score, weights)
+			results[i].Score = Score(query, results[i].Item, results[i].Score, sch, weights)
 		}
 		sort.SliceStable(results, func(i, j int) bool {
 			return results[i].Score > results[j].Score
@@ -45,139 +40,162 @@ func Rerank(query adapters.Item, results []store.SearchResult, weights map[strin
 	return results
 }
 
-// Score combines semanticScore (the cosine similarity already computed by
-// SearchByVector) with structured-field similarity between query and
-// candidate, weighted by weights. A field missing from weights defaults to
-// a weight of 1 (equal weighting), so omitting weights entirely reproduces
-// plain semantic ranking. If every comparable field ends up with zero total
-// weight, semanticScore is returned so results never go unordered.
-func Score(query, candidate adapters.Item, semanticScore float64, weights map[string]float64) float64 {
-	sims := map[string]float64{SemanticKey: semanticScore}
-	if s, ok := jaccard(query.Tags, candidate.Tags); ok {
-		sims[TagsKey] = s
+// HasStructuralWeight reports whether any weight other than "semantic" is
+// positive — i.e. whether re-ranking depends on structured fields. When true,
+// callers must rerank the whole collection rather than only the semantic
+// top-N, since a structurally-similar item may not be semantically near.
+func HasStructuralWeight(weights map[string]float64) bool {
+	for k, w := range weights {
+		if k != SemanticKey && w > 0 {
+			return true
+		}
 	}
-	for name, qv := range query.Fields {
-		cv, present := candidate.Fields[name]
-		if !present {
+	return false
+}
+
+// Score blends the semantic similarity with per-field structured similarity.
+// Each signal participates only if it has positive weight and is comparable
+// between query and candidate. semantic defaults to weight 1. Field similarity
+// is chosen by the field's detected kind:
+//   - list    → strong overlap (any shared value counts; see overlapStrong)
+//   - number  → range-normalized closeness
+//   - keyword → exact (case-insensitive) match
+//   - text    → ignored here (already captured by the semantic vector)
+//
+// The result is the weighted average of active signals, or semanticScore if no
+// structured signal applies.
+func Score(query, candidate adapters.Item, semanticScore float64, sch schema.Schema, weights map[string]float64) float64 {
+	semW, ok := weights[SemanticKey]
+	if !ok {
+		semW = 1.0
+	}
+	weightedSum := semW * semanticScore
+	totalWeight := semW
+
+	for name, w := range weights {
+		if name == SemanticKey || w <= 0 {
 			continue
 		}
-		if s, ok := fieldSimilarity(qv, cv); ok {
-			sims[name] = s
-		}
-	}
 
-	var weightedSum, totalWeight float64
-	for name, sim := range sims {
-		w, ok := weights[name]
+		var (
+			sim float64
+			ok  bool
+		)
+		if name == TagsKey {
+			sim, ok = overlapStrong(query.Tags, candidate.Tags)
+		} else {
+			sim, ok = fieldSimilarity(name, query, candidate, sch)
+		}
 		if !ok {
-			w = 1.0
+			continue
 		}
 		weightedSum += w * sim
 		totalWeight += w
 	}
+
 	if totalWeight <= 0 {
 		return semanticScore
 	}
 	return weightedSum / totalWeight
 }
 
-// fieldSimilarity compares two field values by their Go type, returning
-// ok=false when the types don't match or aren't a kind this package knows
-// how to compare.
-func fieldSimilarity(a, b any) (float64, bool) {
-	if af, ok := asFloat(a); ok {
-		if bf, ok := asFloat(b); ok {
-			return 1 / (1 + abs(af-bf)), true
-		}
+// fieldSimilarity computes the similarity of one schema field between query and
+// candidate. ok is false when the field is absent from either item, is a text
+// field (handled by the embedding), or is unknown to the schema.
+func fieldSimilarity(name string, query, candidate adapters.Item, sch schema.Schema) (float64, bool) {
+	f, known := sch[name]
+	if !known {
 		return 0, false
 	}
-	if as, ok := asStringSlice(a); ok {
-		if bs, ok := asStringSlice(b); ok {
-			return jaccard(as, bs)
-		}
+	qv, qok := query.Fields[name]
+	cv, cok := candidate.Fields[name]
+	if !qok || !cok {
 		return 0, false
-	}
-	if as, ok := a.(string); ok {
-		if bs, ok := b.(string); ok {
-			if strings.EqualFold(as, bs) {
-				return 1.0, true
-			}
-			return 0.0, true
-		}
-		return 0, false
-	}
-	return 0, false
-}
-
-// jaccard returns the Jaccard similarity of two string sets. It returns
-// ok=false only when both inputs are empty (nothing to compare).
-func jaccard(a, b []string) (float64, bool) {
-	if len(a) == 0 && len(b) == 0 {
-		return 0, false
-	}
-	set := make(map[string]struct{}, len(a))
-	for _, v := range a {
-		set[strings.ToLower(v)] = struct{}{}
-	}
-	bSet := make(map[string]struct{}, len(b))
-	for _, v := range b {
-		bSet[strings.ToLower(v)] = struct{}{}
 	}
 
-	intersection := 0
-	union := len(bSet)
-	for v := range set {
-		if _, ok := bSet[v]; ok {
-			intersection++
-		} else {
-			union++
+	switch f.Kind {
+	case schema.List:
+		qs, ok1 := schema.AsStringSlice(qv)
+		cs, ok2 := schema.AsStringSlice(cv)
+		if !ok1 || !ok2 {
+			return 0, false
 		}
-	}
-	if union == 0 {
-		return 0, false
-	}
-	return float64(intersection) / float64(union), true
-}
-
-// asFloat extracts a float64 from a numeric field value, which after a JSON
-// round trip through JSONB always arrives as float64, but may be a native
-// int when built in-process (e.g. from seed data).
-func asFloat(v any) (float64, bool) {
-	switch vv := v.(type) {
-	case float64:
-		return vv, true
-	case int:
-		return float64(vv), true
-	default:
+		return overlapStrong(qs, cs)
+	case schema.Number:
+		qf, ok1 := schema.AsFloat(qv)
+		cf, ok2 := schema.AsFloat(cv)
+		if !ok1 || !ok2 {
+			return 0, false
+		}
+		return numberSim(qf, cf, f.Min, f.Max), true
+	case schema.Keyword:
+		return keywordSim(qv, cv)
+	default: // schema.Text — embedded, not compared here
 		return 0, false
 	}
 }
 
-// asStringSlice extracts a []string from a field value that may be either a
-// native []string or a []interface{} of strings (round-tripped through
-// JSONB).
-func asStringSlice(v any) ([]string, bool) {
-	switch vv := v.(type) {
-	case []string:
-		return vv, true
-	case []any:
-		out := make([]string, 0, len(vv))
-		for _, e := range vv {
-			s, ok := e.(string)
-			if !ok {
-				return nil, false
-			}
-			out = append(out, s)
-		}
-		return out, true
-	default:
-		return nil, false
+// overlapStrong scores set overlap so that any shared value counts strongly:
+// identical sets → 1, otherwise shared/(shared+1) (1 shared ≈ 0.5, 2 ≈ 0.67).
+// ok is false when either side is empty (nothing to compare).
+func overlapStrong(a, b []string) (float64, bool) {
+	if len(a) == 0 || len(b) == 0 {
+		return 0, false
 	}
+	aset := toLowerSet(a)
+	bset := toLowerSet(b)
+
+	shared := 0
+	for v := range aset {
+		if _, ok := bset[v]; ok {
+			shared++
+		}
+	}
+	if shared == len(aset) && shared == len(bset) {
+		return 1.0, true
+	}
+	if shared == 0 {
+		return 0.0, true
+	}
+	return float64(shared) / float64(shared+1), true
 }
 
-func abs(f float64) float64 {
-	if f < 0 {
-		return -f
+// numberSim returns 1 for equal values and decays linearly with the absolute
+// difference, normalized by the field's observed range. Without a usable range
+// it falls back to 1/(1+|Δ|).
+func numberSim(a, b float64, min, max *float64) float64 {
+	d := a - b
+	if d < 0 {
+		d = -d
 	}
-	return f
+	if min != nil && max != nil && *max > *min {
+		s := 1 - d/(*max-*min)
+		if s < 0 {
+			return 0
+		}
+		return s
+	}
+	return 1 / (1 + d)
+}
+
+// keywordSim returns 1 for a case-insensitive exact match, else 0. ok is false
+// when the values aren't strings.
+func keywordSim(a, b any) (float64, bool) {
+	as, ok1 := a.(string)
+	bs, ok2 := b.(string)
+	if !ok1 || !ok2 {
+		return 0, false
+	}
+	if strings.EqualFold(strings.TrimSpace(as), strings.TrimSpace(bs)) {
+		return 1.0, true
+	}
+	return 0.0, true
+}
+
+func toLowerSet(xs []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(xs))
+	for _, x := range xs {
+		out[strings.ToLower(strings.TrimSpace(x))] = struct{}{}
+	}
+	return out
 }

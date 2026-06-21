@@ -21,7 +21,13 @@ func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	}
 
 	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		return pgxvec.RegisterTypes(ctx, conn)
+		// Tolerate a missing "vector" type: on a brand-new database it isn't
+		// registered until `gosim migrate` runs CREATE EXTENSION vector, and
+		// migrate needs a working connection to get that far in the first
+		// place. Once the extension exists, the next pool (next command
+		// invocation) will register it normally.
+		_ = pgxvec.RegisterTypes(ctx, conn)
+		return nil
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)

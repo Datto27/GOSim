@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Datto27/vecsim/cmd"
+	"github.com/Datto27/GOSim/cmd"
 )
 
 func main() {

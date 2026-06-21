@@ -3,7 +3,7 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE IF NOT EXISTS vecsim_meta (
+CREATE TABLE IF NOT EXISTS gosim_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS items (
     type       TEXT        NOT NULL,
     fields     JSONB       NOT NULL DEFAULT '{}',
     tags       TEXT[]      NOT NULL DEFAULT '{}',
-    embedding  vector(${VECSIM_DIMENSIONS}),
+    embedding  vector(${GOSIM_DIMENSIONS}),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -25,4 +25,4 @@ CREATE INDEX IF NOT EXISTS items_embedding_hnsw_idx ON items USING hnsw (embeddi
 
 -- +goose Down
 DROP TABLE IF EXISTS items;
-DROP TABLE IF EXISTS vecsim_meta;
+DROP TABLE IF EXISTS gosim_meta;

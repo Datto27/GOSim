@@ -1,8 +1,9 @@
-// Package store contains all SQL for vecsim. No SQL lives anywhere else.
+// Package store contains all SQL for gosim. No SQL lives anywhere else.
 package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,7 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
 
-	"github.com/Datto27/vecsim/internal/adapters"
+	"github.com/Datto27/GOSim/internal/adapters"
+	"github.com/Datto27/GOSim/internal/schema"
 )
 
 const dbTimeout = 5 * time.Second
@@ -22,9 +24,9 @@ const dbTimeout = 5 * time.Second
 var ErrNotFound = errors.New("store: not found")
 
 // ErrNotEmbedded is returned when an item exists but has no stored embedding.
-var ErrNotEmbedded = errors.New("store: item not yet embedded (run 'vecsim index')")
+var ErrNotEmbedded = errors.New("store: item not yet embedded (run 'gosim index')")
 
-// Store wraps a pgxpool.Pool and provides all database access for vecsim.
+// Store wraps a pgxpool.Pool and provides all database access for gosim.
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -36,14 +38,14 @@ func New(pool *pgxpool.Pool) *Store {
 
 // ─── Meta / profile validation ──────────────────────────────────────────────
 
-// GetMeta fetches the value stored under key in vecsim_meta. It returns
+// GetMeta fetches the value stored under key in gosim_meta. It returns
 // ErrNotFound if the key is absent.
 func (s *Store) GetMeta(ctx context.Context, key string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 
 	var value string
-	err := s.pool.QueryRow(ctx, `SELECT value FROM vecsim_meta WHERE key = $1`, key).Scan(&value)
+	err := s.pool.QueryRow(ctx, `SELECT value FROM gosim_meta WHERE key = $1`, key).Scan(&value)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", ErrNotFound
@@ -53,13 +55,13 @@ func (s *Store) GetMeta(ctx context.Context, key string) (string, error) {
 	return value, nil
 }
 
-// SetMeta upserts key → value in vecsim_meta.
+// SetMeta upserts key → value in gosim_meta.
 func (s *Store) SetMeta(ctx context.Context, key, value string) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO vecsim_meta (key, value) VALUES ($1, $2)
+		INSERT INTO gosim_meta (key, value) VALUES ($1, $2)
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
 	`, key, value)
 	if err != nil {
@@ -75,7 +77,7 @@ func isUndefinedTable(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
 }
 
-// ValidateProfile checks that the profile stored in vecsim_meta matches
+// ValidateProfile checks that the profile stored in gosim_meta matches
 // the configured profile. It returns nil if the meta table is missing or
 // the profile key is absent (interpreted as "not yet migrated").
 func (s *Store) ValidateProfile(ctx context.Context, profile string) error {
@@ -91,11 +93,114 @@ func (s *Store) ValidateProfile(ctx context.Context, profile string) error {
 	}
 	if stored != profile {
 		return fmt.Errorf(
-			"store: validate profile: config says %q but database was migrated with profile %q — re-run 'vecsim migrate' after changing profiles",
+			"store: validate profile: config says %q but database was migrated with profile %q — re-run 'gosim migrate' after changing profiles",
 			profile, stored,
 		)
 	}
 	return nil
+}
+
+// ─── Collections (schema + weights) ─────────────────────────────────────────
+
+// GetCollection returns the detected schema and ranking weights for a
+// collection. A missing collection yields empty (non-nil) maps and no error,
+// so callers can treat "not configured yet" uniformly.
+func (s *Store) GetCollection(ctx context.Context, typ string) (schema.Schema, map[string]float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	var schemaJSON, weightsJSON []byte
+	err := s.pool.QueryRow(ctx,
+		`SELECT schema, weights FROM collections WHERE type = $1`, typ,
+	).Scan(&schemaJSON, &weightsJSON)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return schema.Schema{}, map[string]float64{}, nil
+		}
+		return nil, nil, fmt.Errorf("store: get collection: %w", err)
+	}
+
+	sch := schema.Schema{}
+	if len(schemaJSON) > 0 {
+		if err := json.Unmarshal(schemaJSON, &sch); err != nil {
+			return nil, nil, fmt.Errorf("store: get collection: schema: %w", err)
+		}
+	}
+	weights := map[string]float64{}
+	if len(weightsJSON) > 0 {
+		if err := json.Unmarshal(weightsJSON, &weights); err != nil {
+			return nil, nil, fmt.Errorf("store: get collection: weights: %w", err)
+		}
+	}
+	return sch, weights, nil
+}
+
+// UpsertCollection writes the schema and weights for a collection.
+func (s *Store) UpsertCollection(ctx context.Context, typ string, sch schema.Schema, weights map[string]float64) error {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	schemaJSON, err := json.Marshal(sch)
+	if err != nil {
+		return fmt.Errorf("store: upsert collection: schema: %w", err)
+	}
+	weightsJSON, err := json.Marshal(weights)
+	if err != nil {
+		return fmt.Errorf("store: upsert collection: weights: %w", err)
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO collections (type, schema, weights)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (type) DO UPDATE SET schema = $2, weights = $3
+	`, typ, schemaJSON, weightsJSON)
+	if err != nil {
+		return fmt.Errorf("store: upsert collection: %w", err)
+	}
+	return nil
+}
+
+// SetCollectionWeights updates only the weights for an existing collection,
+// returning ErrNotFound if the collection has not been imported yet.
+func (s *Store) SetCollectionWeights(ctx context.Context, typ string, weights map[string]float64) error {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	weightsJSON, err := json.Marshal(weights)
+	if err != nil {
+		return fmt.Errorf("store: set weights: %w", err)
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE collections SET weights = $2 WHERE type = $1`, typ, weightsJSON)
+	if err != nil {
+		return fmt.Errorf("store: set weights: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ListCollections returns the names of all configured collections, sorted.
+func (s *Store) ListCollections(ctx context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	rows, err := s.pool.Query(ctx, `SELECT type FROM collections ORDER BY type`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list collections: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, fmt.Errorf("store: list collections: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // ─── Items CRUD ──────────────────────────────────────────────────────────────
@@ -247,6 +352,19 @@ func (s *Store) DeleteItem(ctx context.Context, id string) (bool, error) {
 	return tag.RowsAffected() > 0, nil
 }
 
+// DeleteItems removes every item in the given collection, or all items when
+// typ is empty. It returns the number of rows deleted.
+func (s *Store) DeleteItems(ctx context.Context, typ string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	tag, err := s.pool.Exec(ctx, `DELETE FROM items WHERE ($1 = '' OR type = $1)`, typ)
+	if err != nil {
+		return 0, fmt.Errorf("store: delete items: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // ─── Embedding management ─────────────────────────────────────────────────
 
 // SetEmbedding stores vec as the embedding for the item identified by id.
@@ -295,6 +413,36 @@ func (s *Store) ItemsMissingEmbedding(ctx context.Context, typ string, limit int
 	}
 
 	return items, nil
+}
+
+// ItemsForReembed returns all items in a collection (or all collections when
+// typ is ""), regardless of whether they are already embedded. Used by
+// `gosim index --force` to recompute embeddings after the embedding text
+// changes.
+func (s *Store) ItemsForReembed(ctx context.Context, typ string) ([]adapters.Item, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, label, type, fields, tags, false AS embedded, created_at
+		FROM items
+		WHERE ($1 = '' OR type = $1)
+		ORDER BY id
+	`, typ)
+	if err != nil {
+		return nil, fmt.Errorf("store: items for reembed: %w", err)
+	}
+	defer rows.Close()
+
+	var items []adapters.Item
+	for rows.Next() {
+		var item adapters.Item
+		if err := scanItem(rows, &item); err != nil {
+			return nil, fmt.Errorf("store: items for reembed: %w", err)
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 // GetEmbedding returns the stored embedding for item id. It returns
@@ -382,7 +530,7 @@ func (s *Store) SearchByVector(ctx context.Context, vec pgvector.Vector, typ, ex
 
 // ─── Stats ────────────────────────────────────────────────────────────────
 
-// TypeStats holds item and embedding counts for one content type.
+// TypeStats holds item and embedding counts for one collection.
 type TypeStats struct {
 	Count    int `json:"count"`
 	Embedded int `json:"embedded"`

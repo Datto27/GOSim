@@ -1,4 +1,4 @@
-// Package cmd wires together all vecsim CLI commands.
+// Package cmd wires together all gosim CLI commands.
 package cmd
 
 import (
@@ -9,10 +9,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 
-	"github.com/Datto27/vecsim/internal/config"
-	"github.com/Datto27/vecsim/internal/db"
-	"github.com/Datto27/vecsim/internal/embeddings"
-	"github.com/Datto27/vecsim/internal/store"
+	"github.com/Datto27/GOSim/internal/config"
+	"github.com/Datto27/GOSim/internal/db"
+	"github.com/Datto27/GOSim/internal/embeddings"
+	"github.com/Datto27/GOSim/internal/store"
 )
 
 // configPath is the resolved path to the config file, populated by the
@@ -42,12 +42,14 @@ func poolFromCtx(ctx context.Context) *pgxpool.Pool {
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "vecsim",
+	Use:   "gosim",
 	Short: "Universal semantic similarity search engine",
-	Long: `vecsim indexes movies, music, and books as vector embeddings and
-finds the most similar items to any query — including across content types.
+	Long: `gosim imports any collection of JSON objects, embeds them as vectors, and
+finds the most similar items to any query. It detects each collection's
+parameters and lets you weight them, so you control what "similar" means —
+across collections too.
 
-Run 'vecsim setup' to get started.`,
+Run 'gosim setup' to get started.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
@@ -66,7 +68,7 @@ Run 'vecsim setup' to get started.`,
 
 		cfg, err := config.Load(configPath)
 		if err != nil {
-			return fmt.Errorf("%w\n\nRun 'vecsim setup' to create a config file.", err)
+			return fmt.Errorf("%w\n\nRun 'gosim setup' to create a config file.", err)
 		}
 		ctx := config.WithContext(cmd.Context(), cfg)
 
@@ -106,7 +108,7 @@ func skipConfigLoad(cmd *cobra.Command) bool {
 	}
 	// Cobra built-ins that don't have annotations.
 	name := cmd.Name()
-	if name == "help" || name == "completion" || name == "vecsim" {
+	if name == "help" || name == "completion" || name == "gosim" {
 		return true
 	}
 	// Completion subcommands (bash, zsh, fish, powershell).
@@ -120,14 +122,18 @@ func init() {
 	// --config flag on root, inherited by all subcommands.
 	rootCmd.PersistentFlags().StringVar(
 		&configPath, "config", "",
-		"config file (default: ~/.config/vecsim/config.json)",
+		"config file (default: ~/.config/gosim/config.json)",
 	)
 
 	rootCmd.AddCommand(
 		setupCmd,
+		doctorCmd,
 		migrateCmd,
-		seedCmd,
+		importCmd,
+		resetCmd,
 		indexCmd,
+		schemaCmd,
+		weightsCmd,
 		searchCmd,
 		listCmd,
 		statsCmd,

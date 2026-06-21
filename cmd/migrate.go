@@ -12,16 +12,16 @@ import (
 	// Registers the "pgx" database/sql driver used by goose.
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/Datto27/vecsim/internal/config"
-	"github.com/Datto27/vecsim/internal/store"
-	"github.com/Datto27/vecsim/migrations"
+	"github.com/Datto27/GOSim/internal/config"
+	"github.com/Datto27/GOSim/internal/store"
+	"github.com/Datto27/GOSim/migrations"
 )
 
 var migrateCmd = &cobra.Command{
 	Use:   "migrate",
 	Short: "Run database migrations",
-	Long: `Creates the items table, vecsim_meta table, and HNSW index in Postgres.
-The vector column size is determined by the active embedding profile.
+	Long: `Creates the items, gosim_meta, and collections tables plus the HNSW index in
+Postgres. The vector column size is determined by the active embedding profile.
 
 Safe to re-run — goose is idempotent.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -35,9 +35,9 @@ func runMigrate(ctx context.Context) error {
 		return fmt.Errorf("migrate: no config in context")
 	}
 
-	// Inject the dimension so that the SQL template's ${VECSIM_DIMENSIONS}
+	// Inject the dimension so that the SQL template's ${GOSIM_DIMENSIONS}
 	// placeholder is substituted by goose's envsub mechanism.
-	os.Setenv("VECSIM_DIMENSIONS", strconv.Itoa(cfg.Dimensions))
+	os.Setenv("GOSIM_DIMENSIONS", strconv.Itoa(cfg.Dimensions))
 
 	sqlDB, err := goose.OpenDBWithDriver("pgx", cfg.DatabaseURL)
 	if err != nil {
@@ -64,7 +64,7 @@ func runMigrate(ctx context.Context) error {
 		if err := st.SetMeta(ctx, "profile", string(cfg.Profile)); err != nil {
 			return fmt.Errorf("migrate: record profile: %w", err)
 		}
-		fmt.Printf("Profile recorded in vecsim_meta\n")
+		fmt.Printf("Profile recorded in gosim_meta\n")
 	}
 
 	return nil

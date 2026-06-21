@@ -1,4 +1,4 @@
-// Package server wires together vecsim's HTTP API.
+// Package server wires together gosim's HTTP API.
 package server
 
 import (
@@ -29,6 +29,10 @@ func New(h *Handlers, port int, logger *slog.Logger) *Server {
 	mux.HandleFunc("POST /search/embed", h.SearchByText)
 	mux.HandleFunc("GET /stats", h.Stats)
 	mux.HandleFunc("POST /index", h.Index)
+	mux.HandleFunc("POST /import", h.Import)
+	mux.HandleFunc("GET /collections", h.ListCollections)
+	mux.HandleFunc("GET /collections/{type}", h.GetCollection)
+	mux.HandleFunc("PUT /collections/{type}/weights", h.SetCollectionWeights)
 
 	handler := Chain(mux,
 		CORS,
@@ -56,7 +60,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
-	s.logger.Info("vecsim HTTP API started", "addr", s.httpServer.Addr)
+	s.logger.Info("gosim HTTP API started", "addr", s.httpServer.Addr)
 
 	select {
 	case <-ctx.Done():

@@ -25,7 +25,7 @@ var listCmd = &cobra.Command{
 }
 
 func init() {
-	listCmd.Flags().StringVar(&listType, "type", "", "Filter by content type (movie|music|book)")
+	listCmd.Flags().StringVar(&listType, "type", "", "Filter by collection (the --type used at import)")
 	listCmd.Flags().IntVar(&listLimit, "limit", 20, "Maximum items to show")
 	listCmd.Flags().IntVar(&listOffset, "offset", 0, "Offset for pagination")
 }

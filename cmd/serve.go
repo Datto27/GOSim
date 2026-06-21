@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Datto27/vecsim/internal/config"
-	"github.com/Datto27/vecsim/internal/server"
+	"github.com/Datto27/GOSim/internal/config"
+	"github.com/Datto27/GOSim/internal/server"
 )
 
 var servePort int
@@ -17,7 +17,7 @@ var servePort int
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the HTTP API server on localhost",
-	Long:  `Starts the vecsim HTTP API on localhost:<port>. Handles graceful shutdown on SIGINT/SIGTERM.`,
+	Long:  `Starts the gosim HTTP API on localhost:<port>. Handles graceful shutdown on SIGINT/SIGTERM.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, _ := config.FromContext(cmd.Context())
 		port := servePort

@@ -3,93 +3,89 @@ package rerank
 import (
 	"testing"
 
-	"github.com/Datto27/vecsim/internal/adapters"
-	"github.com/Datto27/vecsim/internal/store"
+	"github.com/Datto27/GOSim/internal/adapters"
+	"github.com/Datto27/GOSim/internal/schema"
+	"github.com/Datto27/GOSim/internal/store"
 )
 
-func TestScore_NoWeightsEqualsSemanticAverage(t *testing.T) {
-	query := adapters.Item{
-		Tags:   []string{"a", "b"},
-		Fields: map[string]any{"year": 2010.0},
-	}
-	candidate := adapters.Item{
-		Tags:   []string{"a", "b"},
-		Fields: map[string]any{"year": 2010.0},
-	}
+var movieSchema = schema.Schema{
+	"genre": {Kind: schema.List},
+	"cast":  {Kind: schema.List},
+	"plot":  {Kind: schema.Text},
+	"year":  {Kind: schema.Number, Min: f(2000), Max: f(2020)},
+}
 
-	// All comparable fields are identical (tags Jaccard=1, year sim=1) and
-	// semantic=0.8, all with implicit weight 1, so the average must be 1.
-	got := Score(query, candidate, 0.8, nil)
-	want := (0.8 + 1.0 + 1.0) / 3.0
-	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
-		t.Fatalf("Score() = %v, want %v", got, want)
+func TestScore_NoStructuralWeightIsPureSemantic(t *testing.T) {
+	q := adapters.Item{Fields: map[string]any{"genre": []any{"Sci-Fi"}}}
+	c := adapters.Item{Fields: map[string]any{"genre": []any{"Sci-Fi"}}}
+
+	// Only "semantic" weighted → score equals the semantic score exactly.
+	got := Score(q, c, 0.8, movieSchema, map[string]float64{"semantic": 1})
+	if diff := got - 0.8; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("Score() = %v, want 0.8", got)
 	}
 }
 
-func TestScore_ZeroedFieldIsExcluded(t *testing.T) {
-	query := adapters.Item{
-		Fields: map[string]any{"genre": []string{"scifi"}, "cast": []string{"alice"}},
-	}
-	candidate := adapters.Item{
-		Fields: map[string]any{"genre": []string{"drama"}, "cast": []string{"alice"}},
-	}
+func TestScore_SharedSingleCastMemberCountsStrongly(t *testing.T) {
+	// The Inception → Shutter Island case: one shared actor (DiCaprio) out of
+	// large casts must be a strong signal, not ~0.09 like Jaccard.
+	q := adapters.Item{Fields: map[string]any{
+		"cast": []any{"Leonardo DiCaprio", "Joseph Gordon-Levitt", "Elliot Page", "Tom Hardy", "Ken Watanabe", "Cillian Murphy"},
+	}}
+	c := adapters.Item{Fields: map[string]any{
+		"cast": []any{"Leonardo DiCaprio", "Mark Ruffalo", "Ben Kingsley", "Michelle Williams"},
+	}}
 
-	weights := map[string]float64{"cast": 0, "genre": 1}
-	got := Score(query, candidate, 0.5, weights)
-	// genre sim=0 (no overlap), cast weight=0 so excluded, semantic weight=1
-	// (default) => (1*0.5 + 1*0) / (1+1) = 0.25
-	want := 0.25
-	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
-		t.Fatalf("Score() = %v, want %v", got, want)
+	got := Score(q, c, 0.0, movieSchema, map[string]float64{"semantic": 0, "cast": 1})
+	if got < 0.49 || got > 0.51 {
+		t.Fatalf("one shared cast member scored %v, want ~0.5 (shared/(shared+1))", got)
 	}
 }
 
-func TestScore_AllWeightsZeroFallsBackToSemantic(t *testing.T) {
-	query := adapters.Item{Fields: map[string]any{"genre": []string{"scifi"}}}
-	candidate := adapters.Item{Fields: map[string]any{"genre": []string{"drama"}}}
+func TestScore_GenreVsCastWeightingShiftsRanking(t *testing.T) {
+	query := adapters.Item{Fields: map[string]any{
+		"genre": []any{"Action", "Sci-Fi"},
+		"cast":  []any{"Leonardo DiCaprio"},
+	}}
+	// sameGenre: perfect genre match, no shared cast (like Tron Legacy).
+	sameGenre := adapters.Item{Fields: map[string]any{
+		"genre": []any{"Action", "Sci-Fi"},
+		"cast":  []any{"Garrett Hedlund"},
+	}}
+	// sameCast: shares the lead actor, different genre (like Shutter Island).
+	sameCast := adapters.Item{Fields: map[string]any{
+		"genre": []any{"Thriller"},
+		"cast":  []any{"Leonardo DiCaprio"},
+	}}
 
-	weights := map[string]float64{"semantic": 0, "genre": 0}
-	got := Score(query, candidate, 0.42, weights)
-	if got != 0.42 {
-		t.Fatalf("Score() = %v, want semanticScore 0.42", got)
+	results := func() []store.SearchResult {
+		return []store.SearchResult{
+			{Item: sameGenre, Score: 0.5},
+			{Item: sameCast, Score: 0.5},
+		}
+	}
+
+	// Weight cast heavily → the shared-actor film should win.
+	castFirst := Rerank(query, results(), movieSchema, map[string]float64{"semantic": 0, "cast": 5, "genre": 1}, 2)
+	if castFirst[0].Item.Fields["genre"].([]any)[0] != "Thriller" {
+		t.Fatalf("with cast=5 the shared-actor film should rank first, got genre %v", castFirst[0].Item.Fields["genre"])
+	}
+
+	// Weight genre heavily → the same-genre film should win.
+	genreFirst := Rerank(query, results(), movieSchema, map[string]float64{"semantic": 0, "cast": 1, "genre": 5}, 2)
+	if genreFirst[0].Item.Fields["genre"].([]any)[0] != "Action" {
+		t.Fatalf("with genre=5 the same-genre film should rank first, got genre %v", genreFirst[0].Item.Fields["genre"])
 	}
 }
 
-func TestScore_MismatchedTypeFieldSkipped(t *testing.T) {
-	query := adapters.Item{Fields: map[string]any{"year": 2010.0}}
-	candidate := adapters.Item{Fields: map[string]any{"year": "not-a-number"}}
-
-	// year is incomparable (type mismatch), so only semantic remains.
-	got := Score(query, candidate, 0.9, nil)
-	if got != 0.9 {
-		t.Fatalf("Score() = %v, want 0.9 (semantic only)", got)
+func TestScore_NumberSimUsesRange(t *testing.T) {
+	q := adapters.Item{Fields: map[string]any{"year": 2010.0}}
+	c := adapters.Item{Fields: map[string]any{"year": 2015.0}}
+	// range 2000..2020 (20); |Δ|=5 → 1 - 5/20 = 0.75.
+	got := Score(q, c, 0.0, movieSchema, map[string]float64{"semantic": 0, "year": 1})
+	if got < 0.74 || got > 0.76 {
+		t.Fatalf("year sim = %v, want ~0.75", got)
 	}
 }
 
-func TestRerank_NoWeightsIsPassthroughTruncated(t *testing.T) {
-	query := adapters.Item{}
-	results := []store.SearchResult{
-		{Item: adapters.Item{Label: "a"}, Score: 0.9},
-		{Item: adapters.Item{Label: "b"}, Score: 0.8},
-		{Item: adapters.Item{Label: "c"}, Score: 0.7},
-	}
-
-	got := Rerank(query, results, nil, 2)
-	if len(got) != 2 || got[0].Item.Label != "a" || got[1].Item.Label != "b" {
-		t.Fatalf("Rerank() = %+v, want first two results unchanged", got)
-	}
-}
-
-func TestRerank_WeightedReordersResults(t *testing.T) {
-	query := adapters.Item{Fields: map[string]any{"genre": []string{"scifi"}}}
-	results := []store.SearchResult{
-		{Item: adapters.Item{Label: "high-semantic-low-genre", Fields: map[string]any{"genre": []string{"drama"}}}, Score: 0.9},
-		{Item: adapters.Item{Label: "low-semantic-high-genre", Fields: map[string]any{"genre": []string{"scifi"}}}, Score: 0.5},
-	}
-
-	weights := map[string]float64{"genre": 10, "semantic": 0}
-	got := Rerank(query, results, weights, 2)
-	if got[0].Item.Label != "low-semantic-high-genre" {
-		t.Fatalf("Rerank() top result = %q, want genre match to outrank higher semantic score", got[0].Item.Label)
-	}
-}
+func f(v float64) *float64 { return &v }

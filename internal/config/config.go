@@ -1,4 +1,4 @@
-// Package config defines vecsim's configuration: embedding profiles, the
+// Package config defines gosim's configuration: embedding profiles, the
 // on-disk config file, and a context-based mechanism for passing the loaded
 // config through Cobra commands.
 package config
@@ -30,7 +30,7 @@ type ProfileInfo struct {
 }
 
 // Profiles enumerates the two embedding profiles a user can choose from
-// during `vecsim setup`.
+// during `gosim setup`.
 var Profiles = map[Profile]ProfileInfo{
 	ProfileMax: {
 		Name:         ProfileMax,
@@ -48,7 +48,7 @@ var Profiles = map[Profile]ProfileInfo{
 	},
 }
 
-// Config is the persisted vecsim configuration, stored as JSON at
+// Config is the persisted gosim configuration, stored as JSON at
 // DefaultConfigPath (or a user-specified path via --config).
 type Config struct {
 	Profile     Profile `json:"profile"`
@@ -64,14 +64,14 @@ func (c *Config) ProfileInfo() ProfileInfo {
 	return Profiles[c.Profile]
 }
 
-// DefaultConfigPath returns the standard location for vecsim's config file:
-// $XDG_CONFIG_HOME/vecsim/config.json (or the OS equivalent).
+// DefaultConfigPath returns the standard location for gosim's config file:
+// $XDG_CONFIG_HOME/gosim/config.json (or the OS equivalent).
 func DefaultConfigPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("config: default path: %w", err)
 	}
-	return filepath.Join(dir, "vecsim", "config.json"), nil
+	return filepath.Join(dir, "gosim", "config.json"), nil
 }
 
 // Load reads and parses the config file at path.

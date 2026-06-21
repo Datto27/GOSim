@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Datto27/vecsim/internal/config"
-	"github.com/Datto27/vecsim/internal/store"
+	"github.com/Datto27/GOSim/internal/config"
+	"github.com/Datto27/GOSim/internal/store"
 )
 
 var infoCmd = &cobra.Command{
