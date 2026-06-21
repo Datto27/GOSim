@@ -21,7 +21,7 @@ A "collection" is just the `type` you assign at import. Because text fields shar
 
 ---
 
-Use cases (recommendations, deduplication, mood-based discovery, importing new domains, etc.) and a full step-by-step walkthrough with example output live in **[docs/EXAMPLES.md](docs/EXAMPLES.md)**.
+Use cases (recommendations, deduplication, mood-based discovery, importing new domains, etc.) and a full step-by-step walkthrough with example output live in **[docs/EXAMPLES.md](docs/EXAMPLES.md)**. For a terse, scannable list of every CLI command and HTTP endpoint, see **[docs/COMMANDS.md](docs/COMMANDS.md)**.
 
 ---
 
@@ -99,6 +99,8 @@ go build -o gosim .
 ---
 
 ## CLI reference
+
+See [docs/COMMANDS.md](docs/COMMANDS.md) for a condensed table of every command and flag.
 
 ### `gosim setup [--pull]`
 
