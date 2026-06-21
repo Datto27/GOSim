@@ -175,7 +175,15 @@ When structured weights are active, GOSim re-ranks the whole collection (not jus
 
 ### `gosim serve [--port N]`
 
-Starts the HTTP API server on `localhost:<port>` (default: value from config, fallback `7700`). Handles graceful shutdown on SIGINT/SIGTERM with a 10-second drain window.
+Starts the HTTP API server on `localhost:<port>` (default: value from config, fallback `7700`), attached to the current terminal. Handles graceful shutdown on SIGINT/SIGTERM with a 10-second drain window.
+
+### `gosim start [--port N]`
+
+Launches `gosim serve` detached in the background and returns immediately. Output goes to `~/.config/gosim/gosim.log`; the pid is recorded in `~/.config/gosim/gosim.pid`. Refuses to start a second instance while one is already running. If the process dies immediately (bad config, port already in use, DB unreachable), `start` reports the failure and prints the last lines of the log instead of falsely claiming success.
+
+### `gosim stop`
+
+Stops the background server started with `gosim start`: sends `SIGTERM` to the recorded pid and waits up to 12s for it to exit gracefully, then removes the pid file. Prints a message and exits cleanly if nothing is running. Has no effect on a `gosim serve` running in the foreground — use Ctrl+C for that.
 
 ### `gosim list [--type] [--limit N] [--offset N]`
 

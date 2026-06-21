@@ -139,6 +139,8 @@ func init() {
 		statsCmd,
 		infoCmd,
 		serveCmd,
+		startCmd,
+		stopCmd,
 	)
 }
 

@@ -40,7 +40,9 @@ All commands accept a global `--config <path>` flag (default:
 | Command | Flags | Purpose |
 |---|---|---|
 | `gosim search <query>` | `--type NAME`, `--cross-type`, `--limit N` (default `10`), `--weight key=value,...` | If `<query>` matches a stored label, rank similar items by the collection's weights. Otherwise treat `<query>` as free text and rank by semantic similarity. `--cross-type` searches every collection at once. |
-| `gosim serve` | `--port N` (default: config value, fallback `7700`) | Start the HTTP API on `localhost:<port>`. Graceful shutdown on SIGINT/SIGTERM. |
+| `gosim serve` | `--port N` (default: config value, fallback `7700`) | Start the HTTP API on `localhost:<port>`, attached to the current terminal. Graceful shutdown on SIGINT/SIGTERM (Ctrl+C). |
+| `gosim start` | `--port N` (default: config value, fallback `7700`) | Launch `gosim serve` detached in the background; logs to `~/.config/gosim/gosim.log`, pid recorded in `~/.config/gosim/gosim.pid`. Refuses if already running. |
+| `gosim stop` | — | Stop the background server started with `gosim start` (SIGTERM, waits up to 12s). No-op if nothing is running. |
 
 ### Built-in (Cobra)
 

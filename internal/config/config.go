@@ -74,6 +74,26 @@ func DefaultConfigPath() (string, error) {
 	return filepath.Join(dir, "gosim", "config.json"), nil
 }
 
+// DefaultPIDPath returns the standard location for the pid file written by
+// 'gosim start' and read by 'gosim stop'.
+func DefaultPIDPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("config: default pid path: %w", err)
+	}
+	return filepath.Join(dir, "gosim", "gosim.pid"), nil
+}
+
+// DefaultLogPath returns the standard location 'gosim start' redirects the
+// background server's stdout/stderr to.
+func DefaultLogPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("config: default log path: %w", err)
+	}
+	return filepath.Join(dir, "gosim", "gosim.log"), nil
+}
+
 // Load reads and parses the config file at path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
